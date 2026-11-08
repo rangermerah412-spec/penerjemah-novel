@@ -3,6 +3,7 @@ import os
 import zipfile
 import shutil
 import time
+import concurrent.futures
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 
@@ -23,6 +24,24 @@ st.info("💡 Bahasa tujuan otomatis ke: **Bahasa Indonesia**")
 
 # Area Unggah File EPUB di HP
 uploaded_file = st.file_uploader("Unggah file EPUB novel Anda:", type=["epub"])
+
+# Fungsi internal untuk menerjemahkan satu node teks (Target Thread)
+def translate_node(text_node, translator):
+    if text_node.parent.name in ['script', 'style'] or not text_node.strip():
+        return False
+    
+    teks_asli = text_node.strip()
+    if len(teks_asli) > 2:
+        try:
+            teks_terjemahan = translator.translate(teks_asli)
+            text_node.replace_with(teks_terjemahan)
+            return True
+        except Exception as e:
+            # Jika terkena Rate Limit (Error 429), beri jeda sedikit agar server tenang
+            if "429" in str(e):
+                time.sleep(2)
+            return False
+    return False
 
 if uploaded_file is not None:
     file_asli = uploaded_file.name
@@ -62,22 +81,20 @@ if uploaded_file is not None:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 soup = BeautifulSoup(f.read(), 'html.parser')
             
+            nodes = soup.find_all(string=True)
             perubahan = False
-            for text_node in soup.find_all(string=True):
-                if text_node.parent.name in ['script', 'style'] or not text_node.strip():
-                    continue
+            
+            # --- BAGIAN OPTIMASI MULTITHREADING ---
+            # max_workers=10 berarti menerjemahkan hingga 10 baris teks sekaligus secara bersamaan
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                # Kirim semua node teks di bab ini ke dalam antrean thread pool
+                futures = [executor.submit(translate_node, node, translator) for node in nodes]
                 
-                teks_asli = text_node.strip()
-                if len(teks_asli) > 2:
-                    try:
-                        teks_terjemahan = translator.translate(teks_asli)
-                        text_node.replace_with(teks_terjemahan)
+                # Cek jika ada minimal satu teks yang berhasil diubah
+                for future in concurrent.futures.as_completed(futures):
+                    if future.result():
                         perubahan = True
-                        time.sleep(0.3)
-                    except Exception as e:
-                        if "429" in str(e):
-                            time.sleep(10)
-                        continue
+            # --------------------------------------
             
             if perubahan:
                 with open(file_path, 'w', encoding='utf-8') as f:
@@ -113,4 +130,3 @@ if uploaded_file is not None:
                 file_name=file_baru,
                 mime="application/epub+zip"
             )
-
