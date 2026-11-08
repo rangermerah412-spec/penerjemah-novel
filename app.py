@@ -28,6 +28,8 @@ uploaded_file = st.file_uploader("Unggah file EPUB novel Anda:", type=["epub"])
 # Fungsi internal untuk menerjemahkan string teks tunggal
 def translate_single_string(text, translator):
     try:
+        if not text or not text.strip() or len(text.strip()) <= 2:
+            return text
         return translator.translate(text)
     except Exception as e:
         if "429" in str(e):
@@ -77,31 +79,31 @@ if uploaded_file is not None:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 soup = BeautifulSoup(f.read(), 'html.parser')
             
-            # 1. Kumpulkan semua node teks valid dan teks aslinya
-            valid_nodes = []
+            # --- PERBAIKAN TOTAL DI SINI ---
+            # Cari semua tag teks yang berisi konten novel nyata (p, span, div, h1-h6, dll)
+            tags_to_translate = []
             texts_to_translate = []
             
-            for text_node in soup.find_all(string=True):
-                if text_node.parent.name in ['script', 'style'] or not text_node.strip():
-                    continue
-                teks_asli = text_node.strip()
-                if len(teks_asli) > 2:
-                    valid_nodes.append(text_node)
-                    texts_to_translate.append(teks_asli)
+            # Ambil elemen yang memiliki teks langsung di dalamnya
+            for tag in soup.find_all(['p', 'span', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'a']):
+                # Pastikan tag ini punya teks langsung (bukan cuma membungkus tag lain) dan bukan script/style
+                if tag.string and tag.string.strip() and len(tag.string.strip()) > 2:
+                    tags_to_translate.append(tag)
+                    texts_to_translate.append(tag.string.strip())
             
             perubahan = False
             
-            # 2. Jalankan Multithreading jika ada teks
+            # Jalankan Multithreading jika ada teks yang valid
             if texts_to_translate:
-                # max_workers=8 adalah batas aman terbaik untuk Google Translate gratisan
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                     results = list(executor.map(lambda t: translate_single_string(t, translator), texts_to_translate))
                 
-                # 3. Masukkan kembali hasil terjemahan secara berurutan
-                for node, teks_baru in zip(valid_nodes, results):
-                    if teks_baru and teks_baru != node.strip():
-                        node.replace_with(teks_baru)
+                # Masukkan kembali terjemahan langsung ke dalam atribut `.string` tag tersebut
+                for tag, teks_baru in zip(tags_to_translate, results):
+                    if teks_baru and teks_baru != tag.string:
+                        tag.string = teks_baru
                         perubahan = True
+            # ---------------------------------
             
             if perubahan:
                 with open(file_path, 'w', encoding='utf-8') as f:
