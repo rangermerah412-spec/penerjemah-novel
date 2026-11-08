@@ -4,7 +4,7 @@ import zipfile
 import shutil
 import time
 import concurrent.futures
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from deep_translator import GoogleTranslator
 
 # Setel konfigurasi halaman dasar
@@ -25,29 +25,39 @@ st.info("💡 Bahasa tujuan otomatis ke: **Bahasa Indonesia**")
 # Area Unggah File EPUB di HP
 uploaded_file = st.file_uploader("Unggah file EPUB novel Anda:", type=["epub"])
 
-# Fungsi internal untuk menerjemahkan string teks tunggal
+# Fungsi internal untuk menerjemahkan string teks tunggal + Filter Anti-Instruksi
 def translate_single_string(text, translator):
     try:
         if not text or not text.strip() or len(text.strip()) <= 2:
             return text
-        return translator.translate(text)
+        
+        # Filter awal dari prompt sistem
+        teks_lowered = text.lower()
+        kata_kunci_blokir = ["must be written", "never output", "system prompt", "instruction", "harus ditulis", "jangan pernah"]
+        if any(keyword in teks_lowered for keyword in kata_kunci_blokir):
+            return ""
+            
+        translated = translator.translate(text)
+        
+        # Filter setelah terjemah
+        translated_lowered = translated.lower()
+        if any(keyword in translated_lowered for keyword in kata_kunci_blokir):
+            return ""
+            
+        return translated
     except Exception as e:
         if "429" in str(e):
             time.sleep(2)
-        # Jika gagal, kembalikan teks asli agar novel tidak kosong
         return text
 
 if uploaded_file is not None:
-    # Menggunakan timestamp unik agar nama file tidak bentrok antarpengguna
     session_id = str(int(time.time() * 1000))
     file_asli = f"temp_{session_id}_{uploaded_file.name}"
     nama_unduhan = "TERJEMAHAN_" + uploaded_file.name
 
     st.success(f"File '{uploaded_file.name}' berhasil dimuat!")
 
-    # Tombol Eksekusi
     if st.button("🚀 Mulai Terjemahkan"):
-        # Membuat folder ekstrak yang unik untuk setiap user
         extract_dir = f"temp_epub_{session_id}"
         if os.path.exists(extract_dir):
             shutil.rmtree(extract_dir)
@@ -79,31 +89,36 @@ if uploaded_file is not None:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 soup = BeautifulSoup(f.read(), 'html.parser')
             
-            # --- PERBAIKAN TOTAL DI SINI ---
-            # Cari semua tag teks yang berisi konten novel nyata (p, span, div, h1-h6, dll)
-            tags_to_translate = []
+            # --- PERBAIKAN TOTAL: Kembali menyasar objek text node langsung ---
+            nodes_to_translate = []
             texts_to_translate = []
             
-            # Ambil elemen yang memiliki teks langsung di dalamnya
-            for tag in soup.find_all(['p', 'span', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'a']):
-                # Pastikan tag ini punya teks langsung (bukan cuma membungkus tag lain) dan bukan script/style
-                if tag.string and tag.string.strip() and len(tag.string.strip()) > 2:
-                    tags_to_translate.append(tag)
-                    texts_to_translate.append(tag.string.strip())
+            for text_node in soup.find_all(string=True):
+                # Lewati skrip, gaya, komentar, atau teks kosong
+                if text_node.parent.name in ['script', 'style'] or isinstance(text_node, NavigableString) == False:
+                    continue
+                
+                teks_mentah = str(text_node).strip()
+                if len(teksmentah := teks_mentah) > 2:
+                    nodes_to_translate.append(text_node)
+                    texts_to_translate.append(teksmentah)
             
             perubahan = False
             
-            # Jalankan Multithreading jika ada teks yang valid
             if texts_to_translate:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                # Menggunakan max_workers=5 agar aman dari blokir Google web
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                     results = list(executor.map(lambda t: translate_single_string(t, translator), texts_to_translate))
                 
-                # Masukkan kembali terjemahan langsung ke dalam atribut `.string` tag tersebut
-                for tag, teks_baru in zip(tags_to_translate, results):
-                    if teks_baru and teks_baru != tag.string:
-                        tag.string = teks_baru
-                        perubahan = True
-            # ---------------------------------
+                # Masukkan kembali teks ke node objek aslinya
+                for node, teks_baru in zip(nodes_to_translate, results):
+                    if teks_baru is not None:
+                        if teks_baru == "":
+                            node.extract() # Hapus total jika terdeteksi instruksi sistem raksasa
+                        elif teks_baru != str(node):
+                            # Trik utama: Ganti isi string objek NavigableString langsung di tempatnya
+                            node.replace_with(NavigableString(teks_baru))
+                            perubahan = True
             
             if perubahan:
                 with open(file_path, 'w', encoding='utf-8') as f:
@@ -127,7 +142,6 @@ if uploaded_file is not None:
                         continue
                     zip_write.write(file_path, arcname, compress_type=zipfile.ZIP_DEFLATED)
 
-        # Bersihkan file dan folder temporary milik user ini
         if os.path.exists(extract_dir):
             shutil.rmtree(extract_dir)
         if os.path.exists(file_asli):
@@ -143,6 +157,5 @@ if uploaded_file is not None:
                 mime="application/epub+zip"
             )
         
-        # Hapus file output setelah tombol download siap dimuat ke memori browser
         if os.path.exists(file_baru):
             os.remove(file_baru)
